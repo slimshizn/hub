@@ -1,73 +1,107 @@
 name: Update index
 
-on: 
+on:
   push:
     paths:
-      - 'scenarios/**.yaml'
-      - 'parsers/**.yaml'
-      - 'postoverflows/**.yaml'
-      - 'collections/**.yaml'
-      - 'scenarios/**.yml'
-      - 'parsers/**.yml'
-      - 'postoverflows/**.yml'
-      - 'collections/**.yml'
-      - 'scenarios/**.md'
-      - 'parsers/**.md'
-      - 'postoverflows/**.md'
+      - 'appsec-configs/**.md'
+      - 'appsec-configs/**.yaml'
+      - 'appsec-configs/**.yml'
+      - 'appsec-rules/**.md'
+      - 'appsec-rules/**.yaml'
+      - 'appsec-rules/**.yml'
       - 'collections/**.md'
+      - 'collections/**.yaml'
+      - 'collections/**.yml'
+      - 'contexts/**.md'
+      - 'contexts/**.yaml'
+      - 'contexts/**.yml'
+      - 'parsers/**.md'
+      - 'parsers/**.yaml'
+      - 'parsers/**.yml'
+      - 'postoverflows/**.md'
+      - 'postoverflows/**.yaml'
+      - 'postoverflows/**.yml'
+      - 'scenarios/**.md'
+      - 'scenarios/**.yaml'
+      - 'scenarios/**.yml'
       - '.github/workflows/update-index.yml'
-
+      - "*.go"
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/setup-go@v1
-      with:
-        go-version: 1.13
-    - uses: actions/checkout@v1
-    - name: Create local changes
-      run: |
-        go build
-        ./main -target configs
-    - name: Commit files
-      if: ${{ github.event_name == 'push'}}
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git commit -m "Update index" .index.json || exit 0
-    - name: Push changes
-      if: ${{ github.event_name == 'push'}}
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        branch: ${{ github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.19
+      - uses: actions/checkout@v4
+      - name: Create local changes
+        run: |
+          go build
+          ./main -target configs
+          grep -v <.index.json >.index2.json '"classification": null'
+          mv .index2.json .index.json
+      - uses: nelonoel/branch-name@v1.0.1
+      - name: Commit files
+        if: ${{ github.event_name == 'push'}}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git commit -m "Update index" .index.json || exit 0
+          git pull --rebase origin ${BRANCH_NAME}
+      - name: Push changes
+        if: ${{ github.event_name == 'push'}}
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
 
-  invalidate-cache:
+  run-linter:
     runs-on: ubuntu-latest
     needs: build
-    #Only invalidate cache on master or vX branches
-    #Branches that don't match this pattern are only used for dev, so we can manually invalidate if needed
-    #We should avoid naming dev branches with something starting with v :D 
-    if: |
-        startsWith('refs/heads/v', github.ref) || github.ref == 'refs/heads/master'
     steps:
-    - uses: actions/checkout@v1
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.CF_AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.CF_AWS_SECRET_ACCESS_KEY }}
-        aws-region: eu-west-1
-    - name: Get branch name
-      run: echo "version=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
-    - name: Get changed files
-      run: |
-        changed_files=$(git diff-tree --no-commit-id --name-only -r $GITHUB_SHA | tr '\n' ',' | sed 's/,$/\n/')
-        echo "changed_files=${changed_files}" >> $GITHUB_ENV
-    - name: Invalidate cache
-      run: |
-        aws cloudfront create-invalidation --distribution-id ${{ secrets.CF_DISTRIBUTION_ID }} --paths "/${{ env.version }}/.index.json"
-        IFS=',' read -ra FILE <<< "${{ env.changed_files }}"
-        for i in "${FILE[@]}"; do
-          aws cloudfront create-invalidation --distribution-id ${{ secrets.CF_DISTRIBUTION_ID }} --paths "/${{ env.version }}/$i"
-        done
+      - name: checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pipenv'
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pipenv wheel
+          pipenv install --deploy
+      - name: hub linter
+        run: |
+          pipenv run ./hublint defaults > .hublint.toml
+          pipenv run ./hublint check --color always --no-warning-details
+
+  run-mkindex:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pipenv'
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pipenv wheel
+          pipenv install --deploy
+      - name: run mkindex
+        run: |
+          jq --sort-keys < .index.json >index.json
+          pipenv run ./mkindex >index-new.json
+          if ! (cmp -s index.json index-new.json); then
+              echo "Error: output from mkindex differs from legacy index builder."
+              diff -u index.json index-new.json
+              exit 1
+          fi
