@@ -1,6 +1,7 @@
 parsers:
 - crowdsecurity/syslog-logs
 - ./parsers/s01-parse/schiz0phr3ne/radarr-logs.yaml
+- crowdsecurity/dateparse-enrich
 scenarios:
 - ""
 postoverflows:
